@@ -1,20 +1,19 @@
-# Use Python 3.10 as base image
-FROM python:3.10
+FROM python:3.9-slim
 
-# Set working directory
+# Install FFmpeg and required OS packages
+RUN apt-get update && apt-get install -y ffmpeg && apt-get clean && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
-# Copy project files
-COPY . /app
-
-# Install dependencies
+# Copy Python requirements and install them
+COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install ffmpeg
-RUN apt-get update && apt-get install -y ffmpeg
+# Copy all project files
+COPY . .
 
-# Expose port 8000 for health check
+# Expose port 8000 for health checks (Koyeb)
 EXPOSE 8000
 
-# Run the bot and health check server
-CMD ["sh", "-c", "python3 bot.py & python3 server.py"]
+# Command to run the bot (which starts both the Telegram bot and the health check server)
+CMD ["python", "bot.py"]
