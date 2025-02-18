@@ -1,6 +1,6 @@
 pyrogram==2.0.105
 tgcrypto==1.2.3
 flask==2.2.5
-m3u8==0.6.1
-requests==2.31.0
-pycryptodome==3.20.0
+m3u8
+requests
+pycryptodome
