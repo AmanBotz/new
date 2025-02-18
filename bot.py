@@ -8,7 +8,7 @@ from flask import Flask
 from pyrogram import Client, filters
 from pyrogram.types import Message
 
-# Configure logging
+# Set up logging.
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -32,31 +32,31 @@ def health():
     return "OK", 200
 
 def run_health_server():
-    # Run Flask on 0.0.0.0:8000 for health checks.
     app.run(host="0.0.0.0", port=8000)
 
 #####################################
-# FFmpeg Download Function
+# FFmpeg Download Function (Updated)
 #####################################
 
 def download_m3u8_stream(m3u8_url: str, output_path: str) -> bool:
     """
-    Download an HLS stream using FFmpeg.
-    Adds a User-Agent header to mimic a browser.
-    Returns True if successful, else False.
+    Downloads an HLS stream (m3u8 URL) using FFmpeg.
+    Adds headers to mimic a browser (User-Agent and Referer).
+    Returns True on success, False on error.
     """
-    # Use a common browser User-Agent.
-    headers = "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) " \
-              "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36\r\n"
-
-    # Build the FFmpeg command:
+    # Define headers: both User-Agent and Referer (using the m3u8_url as referer).
+    headers = (
+        "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36\r\n"
+        f"Referer: {m3u8_url}\r\n"
+    )
     cmd = [
         "ffmpeg",
         "-protocol_whitelist", "file,http,https,tcp,tls,crypto",
         "-headers", headers,
         "-i", m3u8_url,
         "-c", "copy",
-        "-y",  # overwrite existing file if any
+        "-y",
         output_path
     ]
     logger.info("Executing FFmpeg command: %s", " ".join(cmd))
@@ -90,19 +90,17 @@ def start_handler(client: Client, message: Message):
 @bot.on_message(filters.command("download"))
 def download_handler(client: Client, message: Message):
     if len(message.command) < 2:
-        message.reply_text("Please provide a valid m3u8 URL.\nUsage: /download <m3u8 URL>")
+        message.reply_text("Usage: /download <m3u8 URL>")
         return
 
     m3u8_url = message.command[1].strip()
-    message.reply_text("Downloading your video. This may take a few minutes...")
+    message.reply_text("Downloading your video. Please wait...")
 
-    # Create a temporary file to store the downloaded video.
     with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_out:
         output_file = temp_out.name
 
-    logger.info("Temporary output file: %s", output_file)
+    logger.info("Temporary file created: %s", output_file)
 
-    # Download the stream.
     if download_m3u8_stream(m3u8_url, output_file):
         try:
             message.reply_document(document=output_file, caption="Here is your video!")
@@ -111,9 +109,8 @@ def download_handler(client: Client, message: Message):
             logger.error("Error sending video: %s", str(e))
             message.reply_text("Error sending the video file.")
     else:
-        message.reply_text("Failed to download the video. Please check the URL and try again.")
+        message.reply_text("Failed to download the video. It might be encrypted or require additional authentication.")
 
-    # Clean up the temporary file.
     try:
         os.remove(output_file)
         logger.info("Temporary file removed.")
@@ -125,12 +122,10 @@ def download_handler(client: Client, message: Message):
 #####################################
 
 def main():
-    # Start the health-check Flask server in a daemon thread.
     health_thread = threading.Thread(target=run_health_server, daemon=True)
     health_thread.start()
     logger.info("Health server started on port 8000.")
 
-    # Start the Telegram bot.
     logger.info("Starting Telegram bot...")
     bot.run()
 
