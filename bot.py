@@ -1,90 +1,138 @@
 import os
-import requests
-import time
-import ffmpeg
+import subprocess
+import tempfile
+import threading
+import logging
+
+from flask import Flask
 from pyrogram import Client, filters
 from pyrogram.types import Message
 
-# Fetch environment variables
-API_ID = int(os.getenv("API_ID"))  # API_ID is an integer
-API_HASH = os.getenv("API_HASH")
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# Create Pyrogram Client
-bot = Client("video_converter_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+# Retrieve Telegram credentials from environment variables.
+TG_API_ID = os.getenv("TG_API_ID")
+TG_API_HASH = os.getenv("TG_API_HASH")
+TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
 
-# Store user session data (to track video URL)
-user_data = {}
+if not all([TG_API_ID, TG_API_HASH, TG_BOT_TOKEN]):
+    logger.error("TG_API_ID, TG_API_HASH, and TG_BOT_TOKEN must be set!")
+    exit(1)
 
-async def download_file(url, filename, message):
-    """Download file with progress updates"""
-    response = requests.get(url, stream=True)
-    total_size = int(response.headers.get("content-length", 0))
-    downloaded = 0
-    start_time = time.time()
+#####################################
+# Health Check Web Server (Flask)
+#####################################
 
-    with open(filename, "wb") as f:
-        for chunk in response.iter_content(chunk_size=1024 * 1024):
-            if chunk:
-                f.write(chunk)
-                downloaded += len(chunk)
+app = Flask(__name__)
 
-                elapsed_time = time.time() - start_time
-                speed = downloaded / elapsed_time if elapsed_time > 0 else 0
-                eta = (total_size - downloaded) / speed if speed > 0 else 0
+@app.route("/")
+def health():
+    return "OK", 200
 
-                progress_msg = (
-                    f"📥 **Downloading video:** `{filename}`\n"
-                    f"📦 **Size:** `{downloaded / 1024 / 1024:.2f} MB / {total_size / 1024 / 1024:.2f} MB`\n"
-                    f"⚡ **Speed:** `{speed / 1024 / 1024:.2f} MB/s`\n"
-                    f"⏳ **ETA:** `{eta:.2f} sec`"
-                )
-                await message.edit_text(progress_msg)
+def run_health_server():
+    # Run Flask on 0.0.0.0:8000 for health checks.
+    app.run(host="0.0.0.0", port=8000)
 
-    return filename
+#####################################
+# FFmpeg Download Function
+#####################################
+
+def download_m3u8_stream(m3u8_url: str, output_path: str) -> bool:
+    """
+    Download an HLS stream using FFmpeg.
+    Adds a User-Agent header to mimic a browser.
+    Returns True if successful, else False.
+    """
+    # Use a common browser User-Agent.
+    headers = "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) " \
+              "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36\r\n"
+
+    # Build the FFmpeg command:
+    cmd = [
+        "ffmpeg",
+        "-protocol_whitelist", "file,http,https,tcp,tls,crypto",
+        "-headers", headers,
+        "-i", m3u8_url,
+        "-c", "copy",
+        "-y",  # overwrite existing file if any
+        output_path
+    ]
+    logger.info("Executing FFmpeg command: %s", " ".join(cmd))
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        logger.info("FFmpeg finished successfully.")
+        return True
+    except subprocess.CalledProcessError as e:
+        logger.error("FFmpeg error: %s", e.stderr.decode())
+        return False
+
+#####################################
+# Telegram Bot Setup (Pyrogram)
+#####################################
+
+bot = Client(
+    "m3u8_bot",
+    api_id=int(TG_API_ID),
+    api_hash=TG_API_HASH,
+    bot_token=TG_BOT_TOKEN
+)
 
 @bot.on_message(filters.command("start"))
-async def start(_, message):
-    await message.reply("👋 Send me a **video link** and I'll download and convert it to MP4!")
+def start_handler(client: Client, message: Message):
+    message.reply_text(
+        "Hello! I can download HLS streams (m3u8 URLs) for you.\n"
+        "Usage: /download <m3u8 URL>\n"
+        "Example:\n/download https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8"
+    )
 
-@bot.on_message(filters.text)
-async def handle_video(_, message):
-    user_id = message.from_user.id
-    video_url = message.text.strip()
+@bot.on_message(filters.command("download"))
+def download_handler(client: Client, message: Message):
+    if len(message.command) < 2:
+        message.reply_text("Please provide a valid m3u8 URL.\nUsage: /download <m3u8 URL>")
+        return
 
-    if video_url.startswith("http"):
-        user_data[user_id] = {"video_url": video_url}
+    m3u8_url = message.command[1].strip()
+    message.reply_text("Downloading your video. This may take a few minutes...")
 
-        await message.reply("✅ **Video URL saved!** Downloading and converting now...")
-        await convert_video(message)
+    # Create a temporary file to store the downloaded video.
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_out:
+        output_file = temp_out.name
+
+    logger.info("Temporary output file: %s", output_file)
+
+    # Download the stream.
+    if download_m3u8_stream(m3u8_url, output_file):
+        try:
+            message.reply_document(document=output_file, caption="Here is your video!")
+            logger.info("Video sent successfully.")
+        except Exception as e:
+            logger.error("Error sending video: %s", str(e))
+            message.reply_text("Error sending the video file.")
     else:
-        await message.reply("❌ Invalid URL. Please send a valid **video URL**.")
+        message.reply_text("Failed to download the video. Please check the URL and try again.")
 
-async def convert_video(message):
-    """Download and convert video to MP4"""
-    user_id = message.from_user.id
-    video_url = user_data[user_id]["video_url"]
+    # Clean up the temporary file.
+    try:
+        os.remove(output_file)
+        logger.info("Temporary file removed.")
+    except Exception as e:
+        logger.warning("Error removing temporary file: %s", str(e))
 
-    video_file = f"video_{user_id}.ts"
-    output_file = f"video_{user_id}.mp4"
+#####################################
+# Main Entrypoint
+#####################################
 
-    status_msg = await message.reply("⏳ **Downloading video...**")
-    await download_file(video_url, video_file, status_msg)
+def main():
+    # Start the health-check Flask server in a daemon thread.
+    health_thread = threading.Thread(target=run_health_server, daemon=True)
+    health_thread.start()
+    logger.info("Health server started on port 8000.")
 
-    await message.reply("🎥 **Converting to MP4...**")
-    
-    # Convert the downloaded video to MP4 using ffmpeg
-    ffmpeg.input(video_file).output(output_file, vcodec="copy", acodec="aac").run(overwrite_output=True)
+    # Start the Telegram bot.
+    logger.info("Starting Telegram bot...")
+    bot.run()
 
-    # Send back the converted MP4 video
-    await message.reply_document(output_file, caption="✅ **Here is your converted MP4 video!**")
-
-    # Clean up
-    os.remove(video_file)
-    os.remove(output_file)
-
-    # Reset user session
-    del user_data[user_id]
-
-# Start bot
-bot.run()
+if __name__ == "__main__":
+    main()
