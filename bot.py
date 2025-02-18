@@ -2,17 +2,16 @@ import os
 import tempfile
 import threading
 import logging
+from urllib.parse import urljoin
 
 import m3u8
 import requests
 from Crypto.Cipher import AES
-from urllib.parse import urljoin
-
 from flask import Flask
 from pyrogram import Client, filters
 from pyrogram.types import Message
 
-# Set up logging.
+# Configure logging.
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -36,18 +35,29 @@ def health():
     return "OK", 200
 
 def run_health_server():
+    # Run Flask on 0.0.0.0:8000 for health checks.
     app.run(host="0.0.0.0", port=8000)
 
 #####################################
-# Download & Decrypt Function using m3u8, requests, and AES
+# Download and Decrypt Function
 #####################################
 
 def download_and_decrypt_m3u8(m3u8_url: str, output_path: str) -> bool:
     """
     Loads the m3u8 manifest, downloads each TS segment,
-    decrypts it if a key is specified, and writes the data to output_path.
-    Returns True on success, False on failure.
+    decrypts it (if an AES-128 key is provided), and writes the combined data
+    to output_path. Returns True on success, False on failure.
     """
+    # Define headers to mimic a real browser.
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36",
+        "Referer": m3u8_url,
+        "Accept": "*/*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "identity",
+        "Connection": "keep-alive"
+    }
     try:
         playlist = m3u8.load(m3u8_url)
     except Exception as e:
@@ -58,7 +68,7 @@ def download_and_decrypt_m3u8(m3u8_url: str, output_path: str) -> bool:
     iv = None
     if playlist.keys and playlist.keys[0] and playlist.keys[0].uri:
         key_url = urljoin(m3u8_url, playlist.keys[0].uri)
-        key_response = requests.get(key_url)
+        key_response = requests.get(key_url, headers=headers)
         if key_response.status_code != 200:
             logger.error("Failed to retrieve key from %s", key_url)
             return False
@@ -66,12 +76,12 @@ def download_and_decrypt_m3u8(m3u8_url: str, output_path: str) -> bool:
         if playlist.keys[0].iv:
             iv = bytes.fromhex(playlist.keys[0].iv.replace("0x", ""))
         else:
-            iv = b'\x00' * 16  # Default IV if not specified
+            iv = b'\x00' * 16
 
     with open(output_path, "wb") as out_file:
         for segment in playlist.segments:
             seg_url = urljoin(m3u8_url, segment.uri)
-            seg_response = requests.get(seg_url)
+            seg_response = requests.get(seg_url, headers=headers)
             if seg_response.status_code != 200:
                 logger.error("Failed to download segment: %s", seg_url)
                 return False
@@ -102,7 +112,7 @@ def start_handler(client: Client, message: Message):
     message.reply_text(
         "Hello! I can download HLS streams (m3u8 URLs) for you.\n"
         "Usage: /download <m3u8 URL>\n"
-        "Example:\n/download https://your-stream.example.com/your.m3u8"
+        "Example:\n/download https://example.com/path/to/your.m3u8"
     )
 
 @bot.on_message(filters.command("download"))
@@ -140,6 +150,7 @@ def download_handler(client: Client, message: Message):
 #####################################
 
 def main():
+    # Start the health-check server in a daemon thread.
     health_thread = threading.Thread(target=run_health_server, daemon=True)
     health_thread.start()
     logger.info("Health server started on port 8000.")
