@@ -1,14 +1,18 @@
 import os
-import subprocess
 import tempfile
 import threading
 import logging
+
+import m3u8
+import requests
+from Crypto.Cipher import AES
+from urllib.parse import urljoin
 
 from flask import Flask
 from pyrogram import Client, filters
 from pyrogram.types import Message
 
-# Configure logging.
+# Set up logging.
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -32,46 +36,55 @@ def health():
     return "OK", 200
 
 def run_health_server():
-    # Run Flask on 0.0.0.0:8000 for health checks.
     app.run(host="0.0.0.0", port=8000)
 
 #####################################
-# FFmpeg Download Function (Updated Headers)
+# Download & Decrypt Function using m3u8, requests, and AES
 #####################################
 
-def download_m3u8_stream(m3u8_url: str, output_path: str) -> bool:
+def download_and_decrypt_m3u8(m3u8_url: str, output_path: str) -> bool:
     """
-    Downloads an HLS stream using FFmpeg.
-    Sends extended HTTP headers to mimic a real browser.
-    Returns True if successful, else False.
+    Loads the m3u8 manifest, downloads each TS segment,
+    decrypts it if a key is specified, and writes the data to output_path.
+    Returns True on success, False on failure.
     """
-    # Build a set of headers that a typical browser sends.
-    headers = (
-        "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36\r\n"
-        f"Referer: {m3u8_url}\r\n"
-        "Accept: */*\r\n"
-        "Accept-Language: en-US,en;q=0.9\r\n"
-        "Accept-Encoding: identity\r\n"
-        "Connection: keep-alive\r\n"
-    )
-    cmd = [
-        "ffmpeg",
-        "-protocol_whitelist", "file,http,https,tcp,tls,crypto",
-        "-headers", headers,
-        "-i", m3u8_url,
-        "-c", "copy",
-        "-y",  # Overwrite if file exists.
-        output_path
-    ]
-    logger.info("Executing FFmpeg command: %s", " ".join(cmd))
     try:
-        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        logger.info("FFmpeg finished successfully.")
-        return True
-    except subprocess.CalledProcessError as e:
-        logger.error("FFmpeg error: %s", e.stderr.decode())
+        playlist = m3u8.load(m3u8_url)
+    except Exception as e:
+        logger.error("Error loading m3u8: %s", str(e))
         return False
+
+    key = None
+    iv = None
+    if playlist.keys and playlist.keys[0] and playlist.keys[0].uri:
+        key_url = urljoin(m3u8_url, playlist.keys[0].uri)
+        key_response = requests.get(key_url)
+        if key_response.status_code != 200:
+            logger.error("Failed to retrieve key from %s", key_url)
+            return False
+        key = key_response.content
+        if playlist.keys[0].iv:
+            iv = bytes.fromhex(playlist.keys[0].iv.replace("0x", ""))
+        else:
+            iv = b'\x00' * 16  # Default IV if not specified
+
+    with open(output_path, "wb") as out_file:
+        for segment in playlist.segments:
+            seg_url = urljoin(m3u8_url, segment.uri)
+            seg_response = requests.get(seg_url)
+            if seg_response.status_code != 200:
+                logger.error("Failed to download segment: %s", seg_url)
+                return False
+            seg_data = seg_response.content
+            if key:
+                try:
+                    cipher = AES.new(key, AES.MODE_CBC, iv)
+                    seg_data = cipher.decrypt(seg_data)
+                except Exception as e:
+                    logger.error("Decryption error for segment %s: %s", seg_url, str(e))
+                    return False
+            out_file.write(seg_data)
+    return True
 
 #####################################
 # Telegram Bot Setup (Pyrogram)
@@ -89,7 +102,7 @@ def start_handler(client: Client, message: Message):
     message.reply_text(
         "Hello! I can download HLS streams (m3u8 URLs) for you.\n"
         "Usage: /download <m3u8 URL>\n"
-        "Example:\n/download https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8"
+        "Example:\n/download https://your-stream.example.com/your.m3u8"
     )
 
 @bot.on_message(filters.command("download"))
@@ -99,14 +112,14 @@ def download_handler(client: Client, message: Message):
         return
 
     m3u8_url = message.command[1].strip()
-    message.reply_text("Downloading your video. Please wait...")
+    message.reply_text("Downloading your video. This may take a few minutes...")
 
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_out:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".ts") as temp_out:
         output_file = temp_out.name
 
-    logger.info("Temporary file created: %s", output_file)
+    logger.info("Temporary output file created: %s", output_file)
 
-    if download_m3u8_stream(m3u8_url, output_file):
+    if download_and_decrypt_m3u8(m3u8_url, output_file):
         try:
             message.reply_document(document=output_file, caption="Here is your video!")
             logger.info("Video sent successfully.")
@@ -114,7 +127,7 @@ def download_handler(client: Client, message: Message):
             logger.error("Error sending video: %s", str(e))
             message.reply_text("Error sending the video file.")
     else:
-        message.reply_text("Failed to download the video. It might be DRM-protected or require additional authentication.")
+        message.reply_text("Failed to download the video. It may be DRM-protected or require extra authentication.")
 
     try:
         os.remove(output_file)
@@ -127,11 +140,9 @@ def download_handler(client: Client, message: Message):
 #####################################
 
 def main():
-    # Start health-check server in a daemon thread.
     health_thread = threading.Thread(target=run_health_server, daemon=True)
     health_thread.start()
     logger.info("Health server started on port 8000.")
-
     logger.info("Starting Telegram bot...")
     bot.run()
 
