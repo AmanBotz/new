@@ -8,7 +8,7 @@ from flask import Flask
 from pyrogram import Client, filters
 from pyrogram.types import Message
 
-# Set up logging.
+# Configure logging.
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -32,23 +32,28 @@ def health():
     return "OK", 200
 
 def run_health_server():
+    # Run Flask on 0.0.0.0:8000 for health checks.
     app.run(host="0.0.0.0", port=8000)
 
 #####################################
-# FFmpeg Download Function (Updated)
+# FFmpeg Download Function (Updated Headers)
 #####################################
 
 def download_m3u8_stream(m3u8_url: str, output_path: str) -> bool:
     """
-    Downloads an HLS stream (m3u8 URL) using FFmpeg.
-    Adds headers to mimic a browser (User-Agent and Referer).
-    Returns True on success, False on error.
+    Downloads an HLS stream using FFmpeg.
+    Sends extended HTTP headers to mimic a real browser.
+    Returns True if successful, else False.
     """
-    # Define headers: both User-Agent and Referer (using the m3u8_url as referer).
+    # Build a set of headers that a typical browser sends.
     headers = (
         "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36\r\n"
         f"Referer: {m3u8_url}\r\n"
+        "Accept: */*\r\n"
+        "Accept-Language: en-US,en;q=0.9\r\n"
+        "Accept-Encoding: identity\r\n"
+        "Connection: keep-alive\r\n"
     )
     cmd = [
         "ffmpeg",
@@ -56,7 +61,7 @@ def download_m3u8_stream(m3u8_url: str, output_path: str) -> bool:
         "-headers", headers,
         "-i", m3u8_url,
         "-c", "copy",
-        "-y",
+        "-y",  # Overwrite if file exists.
         output_path
     ]
     logger.info("Executing FFmpeg command: %s", " ".join(cmd))
@@ -109,7 +114,7 @@ def download_handler(client: Client, message: Message):
             logger.error("Error sending video: %s", str(e))
             message.reply_text("Error sending the video file.")
     else:
-        message.reply_text("Failed to download the video. It might be encrypted or require additional authentication.")
+        message.reply_text("Failed to download the video. It might be DRM-protected or require additional authentication.")
 
     try:
         os.remove(output_file)
@@ -122,6 +127,7 @@ def download_handler(client: Client, message: Message):
 #####################################
 
 def main():
+    # Start health-check server in a daemon thread.
     health_thread = threading.Thread(target=run_health_server, daemon=True)
     health_thread.start()
     logger.info("Health server started on port 8000.")
